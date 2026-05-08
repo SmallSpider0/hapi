@@ -295,11 +295,24 @@ function statusObjectFromAgentState(value: unknown): unknown {
     const record = asRecord(value);
     if (!record) return value;
 
-    const message = asString(record.message);
+    const message = asString(
+        record.message
+        ?? record.output
+        ?? record.result
+        ?? record.finalMessage
+        ?? record.final_message
+    );
     const status = asString(record.status ?? record.state);
-    if (status === 'completed' && message) return { completed: message };
-    if ((status === 'failed' || status === 'error') && message) return { failed: message };
-    if ((status === 'canceled' || status === 'cancelled') && message) return { canceled: message };
+    const normalizedStatus = status?.trim().toLowerCase().replace(/[\s_-]/g, '');
+    const completed = normalizedStatus === 'completed'
+        || normalizedStatus === 'complete'
+        || normalizedStatus === 'done'
+        || record.completed === true
+        || record.done === true;
+    if (completed && message) return { completed: message };
+    if (completed) return { status: 'completed' };
+    if ((normalizedStatus === 'failed' || normalizedStatus === 'error') && message) return { failed: message };
+    if ((normalizedStatus === 'canceled' || normalizedStatus === 'cancelled') && message) return { canceled: message };
     return value;
 }
 

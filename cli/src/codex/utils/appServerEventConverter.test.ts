@@ -279,7 +279,8 @@ describe('AppServerEventConverter', () => {
                 status: 'completed',
                 receiverThreadIds: ['agent-1'],
                 agentsStates: {
-                    'agent-1': { status: 'completed', message: '42' }
+                    'agent-1': { status: 'completed', message: '42' },
+                    'agent-2': { status: 'done', message: null }
                 }
             }
         });
@@ -289,7 +290,8 @@ describe('AppServerEventConverter', () => {
             name: 'wait_agent',
             output: {
                 status: {
-                    'agent-1': { completed: '42' }
+                    'agent-1': { completed: '42' },
+                    'agent-2': { status: 'completed' }
                 },
                 timed_out: false
             },
