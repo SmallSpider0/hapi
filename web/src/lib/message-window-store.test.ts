@@ -1,14 +1,16 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 import type { DecryptedMessage, MessageStatus } from '@/types/api'
 import {
     appendOptimisticMessage,
     clearMessageWindow,
     fetchLatestMessages,
+    fetchOlderMessages,
     getMessageWindowState,
     ingestIncomingMessages,
     markMessagesConsumed,
     removeOptimisticMessage,
+    setAtBottom,
     VISIBLE_WINDOW_SIZE,
     updateMessageStatus,
 } from '@/lib/message-window-store'
@@ -109,6 +111,19 @@ function makeAgentRunMessage(props: {
     } as DecryptedMessage
 }
 
+function makeAgentMessagePage(props: {
+    idPrefix: string
+    startSeq: number
+    count: number
+    startCreatedAt: number
+}): DecryptedMessage[] {
+    return Array.from({ length: props.count }, (_, index) => makeAgentMessage({
+        id: `${props.idPrefix}-${index}`,
+        seq: props.startSeq + index,
+        createdAt: props.startCreatedAt + index,
+    }))
+}
+
 describe('removeOptimisticMessage', () => {
     const SESSION = 'test-session-remove'
 
@@ -178,6 +193,172 @@ describe('removeOptimisticMessage', () => {
 
         const state = getMessageWindowState(SESSION)
         expect(state.messages).toHaveLength(0)
+    })
+})
+
+function deferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res
+        reject = rej
+    })
+    return { promise, resolve, reject }
+}
+
+describe('message-window-store async generations', () => {
+    const SESSION_ID = 'session-message-window-generation-test'
+
+    afterEach(() => {
+        clearMessageWindow(SESSION_ID)
+        sessionStorage.clear()
+    })
+
+    it('does not let a stale failed retry overwrite a newer reset-and-reload state', async () => {
+        const firstRequest = deferred<Awaited<ReturnType<ApiClient['getMessages']>>>()
+        const api = {
+            getMessages: vi.fn(async (_sessionId: string) => {
+                if (api.getMessages.mock.calls.length === 1) {
+                    return await firstRequest.promise
+                }
+                return {
+                    messages: [
+                        makeAgentMessage({
+                            id: 'fresh-message',
+                            seq: 10,
+                            createdAt: 1_700_000_300_000
+                        })
+                    ],
+                    page: {
+                        limit: 50,
+                        nextBeforeSeq: null,
+                        nextBeforeAt: null,
+                        hasMore: false
+                    }
+                }
+            })
+        } as Pick<ApiClient, 'getMessages'> & {
+            getMessages: ReturnType<typeof vi.fn>
+        }
+
+        const staleLoad = fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+        clearMessageWindow(SESSION_ID)
+        await fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+
+        firstRequest.reject(new Error('stale failure'))
+        await staleLoad
+
+        const state = getMessageWindowState(SESSION_ID)
+        expect(state.warning).toBeNull()
+        expect(state.messages.map((message) => message.id)).toEqual(['fresh-message'])
+    })
+
+    it('hydrates persisted window state for progressive re-entry', async () => {
+        ingestIncomingMessages(SESSION_ID, [
+            makeAgentMessage({
+                id: 'persisted-message',
+                seq: 11,
+                createdAt: 1_700_000_301_000
+            })
+        ])
+
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        vi.resetModules()
+
+        const reloadedStore = await import('@/lib/message-window-store')
+        const state = reloadedStore.getMessageWindowState(SESSION_ID)
+
+        expect(state.messages.map((message) => message.id)).toEqual(['persisted-message'])
+        reloadedStore.clearMessageWindow(SESSION_ID)
+    })
+
+    it('does not let a latest refresh wedge an in-flight older load', async () => {
+        const latestPage = makeAgentMessagePage({
+            idPrefix: 'latest',
+            startSeq: 101,
+            count: 50,
+            startCreatedAt: 1_700_000_400_000,
+        })
+        const olderPage = makeAgentMessagePage({
+            idPrefix: 'older',
+            startSeq: 51,
+            count: 50,
+            startCreatedAt: 1_700_000_300_000,
+        })
+        const oldestPage = makeAgentMessagePage({
+            idPrefix: 'oldest',
+            startSeq: 1,
+            count: 50,
+            startCreatedAt: 1_700_000_200_000,
+        })
+        const olderRequest = deferred<Awaited<ReturnType<ApiClient['getMessages']>>>()
+        const callLog: Array<{ beforeAt?: number | null; beforeSeq?: number | null; byPosition?: boolean; limit?: number }> = []
+        const api = {
+            getMessages: vi.fn(async (_sessionId: string, options: { beforeAt?: number | null; beforeSeq?: number | null; byPosition?: boolean; limit?: number } = {}) => {
+                callLog.push(options)
+                const callIndex = callLog.length
+                if (callIndex === 1 || callIndex === 3) {
+                    return {
+                        messages: latestPage,
+                        page: {
+                            limit: options.limit ?? 50,
+                            nextBeforeSeq: 101,
+                            nextBeforeAt: 1_700_000_400_000,
+                            hasMore: true,
+                        }
+                    }
+                }
+                if (callIndex === 2) {
+                    return await olderRequest.promise
+                }
+                return {
+                    messages: oldestPage,
+                    page: {
+                        limit: options.limit ?? 50,
+                        nextBeforeSeq: null,
+                        nextBeforeAt: null,
+                        hasMore: false,
+                    }
+                }
+            })
+        } as Pick<ApiClient, 'getMessages'> & {
+            getMessages: ReturnType<typeof vi.fn>
+        }
+
+        await fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+
+        const olderLoad = fetchOlderMessages(api as unknown as ApiClient, SESSION_ID)
+        await Promise.resolve()
+        expect(getMessageWindowState(SESSION_ID).isLoadingMore).toBe(true)
+
+        setAtBottom(SESSION_ID, false)
+        await fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+
+        olderRequest.resolve({
+            messages: olderPage,
+            page: {
+                limit: 50,
+                nextBeforeSeq: 51,
+                nextBeforeAt: 1_700_000_300_000,
+                hasMore: true,
+            }
+        })
+        await olderLoad
+
+        const recoveredState = getMessageWindowState(SESSION_ID)
+        expect(recoveredState.isLoadingMore).toBe(false)
+        expect(recoveredState.messages.some((message) => message.id === 'older-0')).toBe(true)
+
+        await fetchOlderMessages(api as unknown as ApiClient, SESSION_ID)
+
+        const finalState = getMessageWindowState(SESSION_ID)
+        expect(finalState.isLoadingMore).toBe(false)
+        expect(callLog).toEqual([
+            { byPosition: true, limit: 50 },
+            { byPosition: true, beforeAt: 1_700_000_400_000, beforeSeq: 101, limit: 50 },
+            { byPosition: true, limit: 50 },
+            { byPosition: true, beforeAt: 1_700_000_300_000, beforeSeq: 51, limit: 50 },
+        ])
     })
 })
 
