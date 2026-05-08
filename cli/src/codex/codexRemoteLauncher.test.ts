@@ -22,6 +22,7 @@ const harness = vi.hoisted(() => ({
     emitChildUsageEvents: false,
     emitChildReasoningBurst: false,
     emitChildDoneStatusWithoutMessage: false,
+    emitChildWaitStructuredOutput: false,
     emitChildTaskCompleteBeforeMessage: false,
     suppressChildTaskCompleteEvent: false,
     emitSecondChildMessage: false,
@@ -458,11 +459,14 @@ vi.mock('./codexAppServerClient', () => {
                         agentsStates: {
                             [childThreadId]: {
                                 status: harness.emitChildDoneStatusWithoutMessage ? 'done' : 'completed',
-                                message: harness.emitChildDoneStatusWithoutMessage
-                                    ? null
-                                    : harness.emitSecondChildMessage
-                                        ? secondChildMessage
-                                        : childMessage
+                                message: harness.emitChildWaitStructuredOutput
+                                    ? ''
+                                    : harness.emitChildDoneStatusWithoutMessage
+                                        ? null
+                                        : harness.emitSecondChildMessage
+                                            ? secondChildMessage
+                                            : childMessage,
+                                ...(harness.emitChildWaitStructuredOutput ? { output: { value: 42 } } : {})
                             }
                         }
                     },
@@ -1066,6 +1070,28 @@ describe('codexRemoteLauncher', () => {
         expect(lastCompleted).toEqual(expect.objectContaining({
             result: 'final child output should win',
             activity: 'Completed: final child output should win'
+        }));
+    });
+
+    it('preserves wait_agent structured output when status message is empty', async () => {
+        harness.emitChildThreadEvents = true;
+        harness.emitChildWaitStructuredOutput = true;
+        harness.suppressChildTaskCompleteEvent = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        const completedUpdates = codexMessages.filter((message) => {
+            const record = message as Record<string, unknown>;
+            return record.type === 'agent-run-update'
+                && record.agentId === 'child-thread'
+                && record.status === 'completed';
+        }) as Array<Record<string, unknown>>;
+        const lastCompleted = completedUpdates.at(-1);
+
+        expect(lastCompleted).toEqual(expect.objectContaining({
+            result: { value: 42 },
+            activity: 'Completed: {"value":42}'
         }));
     });
 

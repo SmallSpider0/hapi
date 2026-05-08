@@ -834,11 +834,17 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         const extractAgentStatusMessage = (record: Record<string, unknown>): unknown => {
-            return record.message
-                ?? record.output
-                ?? record.result
-                ?? record.finalMessage
-                ?? record.final_message;
+            const message = asString(record.message);
+            if (message) return message;
+
+            for (const key of ['output', 'result', 'finalMessage', 'final_message'] as const) {
+                const value = record[key];
+                if (value !== undefined && value !== null) {
+                    return asString(value) ?? value;
+                }
+            }
+
+            return undefined;
         };
 
         const normalizeAgentStateValue = (value: unknown): string | null => {
