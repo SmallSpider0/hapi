@@ -36,6 +36,7 @@ const harness = vi.hoisted(() => ({
     emitParentResumeSuccess: false,
     emitRunningChildTurnBeforeSuppressedParent: false,
     emitCompletedChildTurnBeforeSuppressedParent: false,
+    emitTurnAbortedOnInterrupt: false,
     bridgeOptions: [] as unknown[]
 }));
 
@@ -594,10 +595,19 @@ vi.mock('./codexAppServerClient', () => {
         }
 
         async interruptTurn(params?: { threadId?: string; turnId?: string }): Promise<Record<string, never>> {
-            harness.interruptedTurns.push({
-                threadId: params?.threadId ?? 'thread-unknown',
-                turnId: params?.turnId ?? 'turn-unknown'
-            });
+            const threadId = params?.threadId ?? 'thread-unknown';
+            const turnId = params?.turnId ?? 'turn-unknown';
+            harness.interruptedTurns.push({ threadId, turnId });
+            if (harness.emitTurnAbortedOnInterrupt) {
+                const interrupted = {
+                    threadId,
+                    turnId,
+                    status: 'interrupted',
+                    turn: { id: turnId }
+                };
+                harness.notifications.push({ method: 'turn/completed', params: interrupted });
+                this.notificationHandler?.('turn/completed', interrupted);
+            }
             return {};
         }
 
@@ -768,6 +778,7 @@ describe('codexRemoteLauncher', () => {
         harness.emitParentResumeSuccess = false;
         harness.emitRunningChildTurnBeforeSuppressedParent = false;
         harness.emitCompletedChildTurnBeforeSuppressedParent = false;
+        harness.emitTurnAbortedOnInterrupt = false;
         harness.bridgeOptions = [];
     });
 
@@ -1475,6 +1486,29 @@ describe('codexRemoteLauncher', () => {
             { threadId: 'child-thread', turnId: 'child-turn' }
         ]);
         expect(resetThreadCalls).toEqual(['thread-1']);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('interrupts active child agent turns when the abort RPC is invoked', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitRunningChildTurnBeforeSuppressedParent = true;
+        harness.emitTurnAbortedOnInterrupt = true;
+        const { session, rpcHandlers } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(harness.startTurnThreadIds).toEqual(['thread-1']);
+            expect(rpcHandlers.has('abort')).toBe(true);
+        });
+
+        await rpcHandlers.get('abort')?.({});
+        const exitReason = await running;
+
+        expect(exitReason).toBe('exit');
+        expect(harness.interruptedTurns).toEqual([
+            { threadId: 'thread-1', turnId: 'turn-1' },
+            { threadId: 'child-thread', turnId: 'child-turn' }
+        ]);
         expect(session.thinking).toBe(false);
     });
 
