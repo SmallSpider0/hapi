@@ -34,6 +34,8 @@ const harness = vi.hoisted(() => ({
     emitParentSpawnStartWithoutEnd: false,
     emitParentSendInputFailure: false,
     emitParentResumeSuccess: false,
+    emitRunningChildTurnBeforeSuppressedParent: false,
+    emitCompletedChildTurnBeforeSuppressedParent: false,
     bridgeOptions: [] as unknown[]
 }));
 
@@ -107,6 +109,33 @@ vi.mock('./codexAppServerClient', () => {
                     notify();
                 }
                 return { turn: { id: turnId } };
+            }
+
+            if (
+                harness.emitRunningChildTurnBeforeSuppressedParent
+                || harness.emitCompletedChildTurnBeforeSuppressedParent
+            ) {
+                const childStarted = {
+                    msg: {
+                        type: 'task_started',
+                        thread_id: 'child-thread',
+                        turn_id: 'child-turn'
+                    }
+                };
+                harness.notifications.push({ method: 'codex/event/task_started', params: childStarted });
+                this.notificationHandler?.('codex/event/task_started', childStarted);
+
+                if (harness.emitCompletedChildTurnBeforeSuppressedParent) {
+                    const childCompleted = {
+                        msg: {
+                            type: 'task_complete',
+                            thread_id: 'child-thread',
+                            turn_id: 'child-turn'
+                        }
+                    };
+                    harness.notifications.push({ method: 'codex/event/task_complete', params: childCompleted });
+                    this.notificationHandler?.('codex/event/task_complete', childCompleted);
+                }
             }
 
             if (harness.suppressTurnCompletion) {
@@ -737,6 +766,8 @@ describe('codexRemoteLauncher', () => {
         harness.emitParentSpawnStartWithoutEnd = false;
         harness.emitParentSendInputFailure = false;
         harness.emitParentResumeSuccess = false;
+        harness.emitRunningChildTurnBeforeSuppressedParent = false;
+        harness.emitCompletedChildTurnBeforeSuppressedParent = false;
         harness.bridgeOptions = [];
     });
 
@@ -1428,6 +1459,37 @@ describe('codexRemoteLauncher', () => {
             type: 'message',
             message: 'Context was reset'
         });
+        expect(session.thinking).toBe(false);
+    });
+
+    it('interrupts active child agent turns before clearing codex thread state', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitRunningChildTurnBeforeSuppressedParent = true;
+        const { session, resetThreadCalls } = createSessionStub(['first message', '/clear']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.interruptedTurns).toEqual([
+            { threadId: 'thread-1', turnId: 'turn-1' },
+            { threadId: 'child-thread', turnId: 'child-turn' }
+        ]);
+        expect(resetThreadCalls).toEqual(['thread-1']);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('does not interrupt completed child agent turns when clearing codex thread state', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitCompletedChildTurnBeforeSuppressedParent = true;
+        const { session, resetThreadCalls } = createSessionStub(['first message', '/clear']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.interruptedTurns).toEqual([
+            { threadId: 'thread-1', turnId: 'turn-1' }
+        ]);
+        expect(resetThreadCalls).toEqual(['thread-1']);
         expect(session.thinking).toBe(false);
     });
 
