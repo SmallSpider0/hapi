@@ -232,17 +232,20 @@ export function useHappyRuntime(props: {
     session: Session
     blocks: readonly VisibleChatBlock[]
     isSending: boolean
+    isRunning?: boolean
     onSendMessage: (text: string, attachments?: AttachmentMetadata[]) => void
     onAbort: () => Promise<void>
     attachmentAdapter?: AttachmentAdapter
     allowSendWhenInactive?: boolean
 }) {
+    const isRunning = props.isRunning ?? props.session.thinking
+
     // Use cached message converter for performance optimization
     // This prevents re-converting all messages on every render
     const convertedMessages = useExternalMessageConverter<VisibleChatBlock>({
         callback: toThreadMessageLike,
         messages: props.blocks as VisibleChatBlock[],
-        isRunning: props.session.thinking,
+        isRunning,
     })
 
     const onNew = useCallback(async (message: AppendMessage) => {
@@ -259,7 +262,7 @@ export function useHappyRuntime(props: {
     // useExternalStoreRuntime may use adapter identity for subscriptions
     const adapter = useMemo(() => ({
         isDisabled: props.isSending || (!props.session.active && !props.allowSendWhenInactive),
-        isRunning: props.session.thinking,
+        isRunning,
         messages: convertedMessages,
         onNew,
         onCancel,
@@ -269,7 +272,7 @@ export function useHappyRuntime(props: {
         props.session.active,
         props.isSending,
         props.allowSendWhenInactive,
-        props.session.thinking,
+        isRunning,
         convertedMessages,
         onNew,
         onCancel,
