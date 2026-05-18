@@ -57,6 +57,19 @@ rows = int(sys.argv[3])
 name = os.path.basename(shell)
 argv = [shell, '-i'] if name in ('bash', 'zsh', 'fish') else [shell]
 master_fd, slave_fd = pty.openpty()
+master_fd_closed = False
+master_fd_lock = threading.Lock()
+
+def close_master_fd():
+    global master_fd_closed
+    with master_fd_lock:
+        if master_fd_closed:
+            return
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        master_fd_closed = True
 
 def set_size(next_cols, next_rows):
     winsize = struct.pack('HHHH', int(next_rows), int(next_cols), 0, 0)
@@ -67,8 +80,27 @@ def set_size(next_cols, next_rows):
         pass
 
 set_size(cols, rows)
-proc = subprocess.Popen(argv, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, preexec_fn=os.setsid)
+
+def setup_child():
+    os.setsid()
+    fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
+proc = subprocess.Popen(argv, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, preexec_fn=setup_child)
 os.close(slave_fd)
+
+def terminate_child_group(sig=signal.SIGTERM):
+    try:
+        os.killpg(proc.pid, sig)
+    except OSError:
+        pass
+
+def handle_bridge_signal(signum, _frame):
+    terminate_child_group(signal.SIGTERM)
+    close_master_fd()
+    os._exit(128 + signum)
+
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(signum, handle_bridge_signal)
 
 def input_loop():
     for raw in sys.stdin.buffer:
@@ -88,14 +120,14 @@ def input_loop():
         except Exception as exc:
             print('[hapi-terminal-pty] input error: %s' % exc, file=sys.stderr)
             break
-    try:
-        proc.terminate()
-    except OSError:
-        pass
+    terminate_child_group()
+    close_master_fd()
 
 threading.Thread(target=input_loop, daemon=True).start()
 
 while True:
+    if master_fd_closed:
+        break
     if proc.poll() is not None:
         timeout = 0
     else:
@@ -118,11 +150,17 @@ while True:
     elif proc.poll() is not None:
         break
 
-try:
-    os.close(master_fd)
-except OSError:
-    pass
-os._exit(proc.wait() if proc.poll() is None else proc.returncode)
+close_master_fd()
+
+if proc.poll() is None:
+    terminate_child_group()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        terminate_child_group(signal.SIGKILL)
+        proc.wait()
+
+os._exit(proc.returncode if proc.returncode is not None else 0)
 `;
 
 const SENSITIVE_ENV_KEYS = new Set([

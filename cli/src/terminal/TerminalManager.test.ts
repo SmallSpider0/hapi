@@ -119,6 +119,10 @@ describe('TerminalManager', () => {
                 stdio: ['pipe', 'pipe', 'pipe']
             })
         );
+        const pythonScript = mocks.spawn.mock.calls[0]?.[1]?.[1] as string;
+        expect(pythonScript).toContain('TIOCSCTTY');
+        expect(pythonScript).toContain('terminate_child_group');
+        expect(pythonScript).toContain('os.killpg(proc.pid, sig)');
         expect(onReady).toHaveBeenCalledWith({ sessionId: 'session-1', terminalId: 'terminal-1' });
         expect(JSON.parse(stdinLines[0] ?? '{}')).toEqual({
             type: 'write',
